@@ -42,15 +42,15 @@ MAX_RETRY_DELAY = 60  # seconds
 
 # Exit condition configuration
 EXIT_FILE = "/tmp/run_completed"
-EMPTY_PERIOD_THRESHOLD = os.getenv("EMPTY_PERIOD_THRESHOLD", 5)
-EMPTY_PERIOD_DURATION = os.getenv("EMPTY_PERIOD_DURATION", 30)
-MIN_DOCUMENTS_PROCESSED = os.getenv(
-    "MIN_DOCUMENTS_PROCESSED", 10000
+EMPTY_PERIOD_THRESHOLD = int(os.getenv("EMPTY_PERIOD_THRESHOLD", 5))
+EMPTY_PERIOD_DURATION = int(os.getenv("EMPTY_PERIOD_DURATION", 30))
+MIN_DOCUMENTS_PROCESSED = int(
+    os.getenv("MIN_DOCUMENTS_PROCESSED", 10000)
 )  # Minimum number of documents to process before exiting
 
 # Logging configuration
-LOG_INTERVAL_OPERATIONS = os.getenv("LOG_INTERVAL_OPERATIONS", 100)
-LOG_INTERVAL_SECONDS = os.getenv("LOG_INTERVAL_SECONDS", 10)
+LOG_INTERVAL_OPERATIONS = int(os.getenv("LOG_INTERVAL_OPERATIONS", 100))
+LOG_INTERVAL_SECONDS = int(os.getenv("LOG_INTERVAL_SECONDS", 10))
 
 
 def wait_for_load_completion():

@@ -76,6 +76,14 @@ class SimpleSampler:
         self.samples.append(latency)
         self.latencies.append([round(timestamp, 2), round(latency, 2)])
 
+    def get_percentile(self, sorted_samples, percentile):
+        """Calculate percentile value from sorted samples"""
+        if not sorted_samples:
+            return None
+
+        index = int(len(sorted_samples) * percentile / 100)
+        return sorted_samples[index]
+
     def get_stats(self):
         if not self.samples:
             return None
@@ -83,9 +91,10 @@ class SimpleSampler:
         sorted_samples = sorted(self.samples)
         return {
             "sample_count": len(self.samples),
-            "median_latency": sorted_samples[len(sorted_samples) // 2],
             "min_latency": sorted_samples[0],
-            "max_latency": sorted_samples[-1],
+            "p50_latency": self.get_percentile(sorted_samples, 50),
+            "p90_latency": self.get_percentile(sorted_samples, 90),
+            "p99_latency": self.get_percentile(sorted_samples, 99),
         }
 
 
@@ -121,9 +130,10 @@ class ChangeStreamMonitor:
         if stats:
             logger.info("Sampling stats:")
             logger.info(f"  Sample count: {stats['sample_count']}")
-            logger.info(f"  Median latency: {stats['median_latency']:.2f}ms")
             logger.info(f"  Min latency: {stats['min_latency']:.2f}ms")
-            logger.info(f"  Max latency: {stats['max_latency']:.2f}ms")
+            logger.info(f"  P50 latency: {stats['p50_latency']:.2f}ms")
+            logger.info(f"  P90 latency: {stats['p90_latency']:.2f}ms")
+            logger.info(f"  P99 latency: {stats['p99_latency']:.2f}ms")
 
         # Save sampled latencies to JSON file
         latencies_file_path = os.path.join("logs", "latencies.json")
@@ -132,9 +142,10 @@ class ChangeStreamMonitor:
             "wall_clock_runtime_seconds": wall_time,
             "average_throughput": average_throughput,
             "sampled_count": len(self.sampler.latencies),
-            "median_latency": stats["median_latency"] if stats else None,
             "min_latency": stats["min_latency"] if stats else None,
-            "max_latency": stats["max_latency"] if stats else None,
+            "p50_latency": stats["p50_latency"] if stats else None,
+            "p90_latency": stats["p90_latency"] if stats else None,
+            "p99_latency": stats["p99_latency"] if stats else None,
         }
 
         with open(latencies_file_path, "w") as f:

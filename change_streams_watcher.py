@@ -35,7 +35,7 @@ DB_NAME = os.getenv("MONGODB_DATABASE")
 COLLECTION_NAME = os.getenv("MONGODB_COLLECTION")
 WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
 FULL_DOCUMENT_LOOKUP = os.getenv("FULL_DOCUMENT_LOOKUP", "false").lower() == "true"
-DOCUMENTS_TO_PROCESS = os.getenv("DOCUMENTS_TO_PROCESS", 10000)
+DOCUMENTS_TO_PROCESS = os.getenv("DOCUMENTS_TO_PROCESS", 10001)
 
 # Performance tuning
 MAX_WORKERS = min(32, (os.cpu_count() or 1) * 4)
@@ -109,6 +109,19 @@ class ChangeStreamMonitor:
         self.sampler.add_sample(now.timestamp(), latency)
 
     def _calculate_latency(self, change_time, operation_time):
+        if isinstance(operation_time, Timestamp):
+            operation_time = datetime.fromtimestamp(operation_time.time, timezone.utc)
+        elif isinstance(operation_time, datetime):
+            if operation_time.tzinfo is None:
+                operation_time = operation_time.replace(tzinfo=timezone.utc)
+        else:
+            logger.warning(f"Unexpected operation_time type: {type(operation_time)}")
+            return 0
+
+        # Ensure change_time has timezone
+        if change_time.tzinfo is None:
+            change_time = change_time.replace(tzinfo=timezone.utc)
+
         return round((change_time - operation_time).total_seconds() * 1000, 2)
 
     def print_final_summary(self):

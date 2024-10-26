@@ -18,7 +18,7 @@ os.makedirs("logs", exist_ok=True)
 
 # Set up logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
@@ -68,8 +68,8 @@ MAX_RETRY_DELAY = 60
 SAMPLING_RATE = 0.05
 LOG_INTERVAL_OPERATIONS = 1000
 
-# Fixed runtime in seconds (5 minutes)
-RUNTIME_SECONDS = 300
+# Fixed runtime in seconds (4 minutes)
+RUNTIME_SECONDS = 240
 
 # Exit file path
 EXIT_FILE = "/tmp/run_completed"
@@ -261,7 +261,9 @@ def watch_changes(collection):
     monitor = ChangeStreamMonitor()
     retry_attempts = 0
     resume_token = None
-    end_time = time.time() + RUNTIME_SECONDS
+    empty_batches = 0
+    MAX_EMPTY_BATCHES = 5
+    MIN_DOCUMENTS = 10000
 
     def signal_handler(signum, frame):
         logger.info("Interrupt received, stopping change stream...")
@@ -271,17 +273,44 @@ def watch_changes(collection):
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
-        while time.time() < end_time:
+        while (
+            empty_batches < MAX_EMPTY_BATCHES
+            or monitor.total_documents_processed < MIN_DOCUMENTS
+        ):
             try:
                 with collection.watch(
                     [], **CHANGE_STREAM_OPTIONS, resume_after=resume_token
                 ) as stream:
-                    for change in stream:
-                        if time.time() >= end_time:
-                            break
-                        monitor.process_change(change)
-                        resume_token = stream.resume_token
-                        retry_attempts = 0
+                    # Try to get next change with timeout
+                    change = stream.try_next()
+
+                    if change is None:
+                        empty_batches += 1
+                        logger.info(
+                            f"No changes detected ({empty_batches}/{MAX_EMPTY_BATCHES})"
+                        )
+                        # Only exit on empty batches if we've processed minimum documents
+                        if monitor.total_documents_processed >= MIN_DOCUMENTS:
+                            if empty_batches >= MAX_EMPTY_BATCHES:
+                                logger.info(
+                                    f"Reached {empty_batches} empty batches and processed {monitor.total_documents_processed} documents. Exiting..."
+                                )
+                                break
+                        continue
+
+                    # Reset empty batch counter if we got a change
+                    empty_batches = 0
+
+                    # Process the change
+                    monitor.process_change(change)
+                    resume_token = stream.resume_token
+                    retry_attempts = 0
+
+                    # Log progress for minimum documents condition
+                    if monitor.total_documents_processed % 1000 == 0:
+                        logger.info(
+                            f"Processed {monitor.total_documents_processed}/{MIN_DOCUMENTS} minimum required documents"
+                        )
 
             except (PyMongoError, OperationFailure, NetworkTimeout) as e:
                 retry_attempts += 1
@@ -300,6 +329,9 @@ def watch_changes(collection):
     except Exception as e:
         logger.error(f"Unexpected error occurred: {e}")
     finally:
+        logger.info(
+            f"Exiting after processing {monitor.total_documents_processed} documents with {empty_batches} empty batches"
+        )
         monitor.print_final_summary()
 
 

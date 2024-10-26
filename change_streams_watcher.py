@@ -71,6 +71,9 @@ LOG_INTERVAL_OPERATIONS = 1000
 # Fixed runtime in seconds (5 minutes)
 RUNTIME_SECONDS = 300
 
+# Exit file path
+EXIT_FILE = "/tmp/run_completed"
+
 
 class SimpleSampler:
     def __init__(self):
@@ -98,16 +101,28 @@ class ChangeStreamMonitor:
     def __init__(self):
         self.sampler = SimpleSampler()
         self.total_documents_processed = 0
-        self.start_time = time.time()
-        self.latest_change_time = None
+        self.start_time = time.time()  # Wall clock start time
+        self.first_change_time = None  # Time of first change
+        self.last_change_time = None  # Time of last change
         self.operation_counts = {"unknown": {"insert": 0, "update": 0, "replace": 0}}
 
     def process_change(self, change):
         self.total_documents_processed += 1
-        self.latest_change_time = datetime.now(timezone.utc)
+
+        # Track change timestamps
+        current_time = change.get("clusterTime", datetime.now(timezone.utc))
+        if isinstance(current_time, Timestamp):
+            current_time = datetime.fromtimestamp(current_time.time, timezone.utc)
+
+        if self.first_change_time is None:
+            self.first_change_time = current_time
+        self.last_change_time = current_time
+
+        # Sample only a portion of changes
         if self.total_documents_processed % int(1 / SAMPLING_RATE) != 1:
             return
 
+        now = datetime.now(timezone.utc)
         if change["operationType"] in ["insert", "replace", "update"]:
             region = self._get_region(change)
         else:
@@ -117,9 +132,8 @@ class ChangeStreamMonitor:
             self.operation_counts[region] = {"insert": 0, "update": 0, "replace": 0}
         self.operation_counts[region][change["operationType"]] += 1
 
-        operation_time = change.get("clusterTime", datetime.now(timezone.utc))
-        latency = self._calculate_latency(self.latest_change_time, operation_time)
-        self.sampler.add_sample(self.latest_change_time.timestamp(), latency)
+        latency = self._calculate_latency(now, current_time)
+        self.sampler.add_sample(now.timestamp(), latency)
 
         if self.total_documents_processed % LOG_INTERVAL_OPERATIONS == 1:
             logger.info(f"Processed {self.total_documents_processed} documents")
@@ -131,21 +145,38 @@ class ChangeStreamMonitor:
         return "unknown"
 
     def _calculate_latency(self, change_time, operation_time):
-        if isinstance(operation_time, Timestamp):
-            operation_time = datetime.fromtimestamp(operation_time.time, timezone.utc)
         return round((change_time - operation_time).total_seconds() * 1000, 2)
 
+    def get_change_duration(self):
+        """Calculate the duration between first and last change"""
+        if self.first_change_time is None or self.last_change_time is None:
+            return 0
+
+        duration = (self.last_change_time - self.first_change_time).total_seconds()
+        return max(0, round(duration, 2))
+
+    def write_completion_marker(self):
+        completion_time = datetime.now()
+        with open(EXIT_FILE, "w") as f:
+            f.write(f"Change stream completed at {completion_time}")
+        logger.info(f"Wrote completion marker to {EXIT_FILE}")
+
     def print_final_summary(self):
-        elapsed_time = int(self.latest_change_time - self.start_time)
+        wall_time = int(time.time() - self.start_time)
+        change_duration = self.get_change_duration()
         stats = self.sampler.get_stats()
 
         logger.info("Change stream completed.")
-        logger.info(f"Total runtime: {elapsed_time} seconds")
+        logger.info(f"Wall clock runtime: {wall_time} seconds")
+        logger.info(f"Change stream duration: {change_duration} seconds")
         logger.info(f"Total documents processed: {self.total_documents_processed}")
 
         if self.total_documents_processed > 0:
+            changes_per_second = self.total_documents_processed / max(
+                1, change_duration
+            )
             logger.info(
-                f"Average throughput: {self.total_documents_processed / elapsed_time:.2f} documents/second"
+                f"Average throughput: {changes_per_second:.2f} documents/second"
             )
 
         if stats:
@@ -160,13 +191,21 @@ class ChangeStreamMonitor:
         metadata = {
             "total_processed": self.total_documents_processed,
             "sampled_count": len(self.sampler.latencies),
-            "total_runtime_seconds": elapsed_time,
+            "wall_clock_runtime_seconds": wall_time,
+            "change_stream_duration_seconds": change_duration,
+            "first_change_time": (
+                self.first_change_time.isoformat() if self.first_change_time else None
+            ),
+            "last_change_time": (
+                self.last_change_time.isoformat() if self.last_change_time else None
+            ),
         }
 
         if self.total_documents_processed > 0:
             metadata.update(
                 {
-                    "average_throughput": self.total_documents_processed / elapsed_time,
+                    "average_throughput": self.total_documents_processed
+                    / max(1, change_duration),
                     "median_latency": stats["median_latency"] if stats else None,
                     "min_latency": stats["min_latency"] if stats else None,
                     "max_latency": stats["max_latency"] if stats else None,
@@ -184,6 +223,9 @@ class ChangeStreamMonitor:
                 indent=2,
             )
         logger.info(f"Latencies saved to {latencies_file_path}")
+
+        # Write completion marker file
+        self.write_completion_marker()
 
 
 def wait_for_load_completion():

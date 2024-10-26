@@ -6,7 +6,6 @@ import logging
 from dotenv import load_dotenv
 from pymongo import MongoClient, ReadPreference
 from pymongo.server_api import ServerApi
-from pymongo.errors import PyMongoError
 from bson.timestamp import Timestamp
 import json
 
@@ -229,6 +228,9 @@ def main():
 
 
 if __name__ == "__main__":
+    if EXIT_FILE and os.path.exists(EXIT_FILE):
+        exit(0)
+
     if WAIT_FILE_PATH:
         logger.info(f"Waiting for file: {WAIT_FILE_PATH}")
         while not os.path.exists(WAIT_FILE_PATH):

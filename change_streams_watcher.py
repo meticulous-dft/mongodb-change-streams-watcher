@@ -8,7 +8,6 @@ from pymongo import MongoClient, ReadPreference
 from pymongo.server_api import ServerApi
 from pymongo.errors import PyMongoError, OperationFailure, NetworkTimeout
 from bson.timestamp import Timestamp
-import threading
 import json
 
 # Load .env file if it exists
@@ -37,11 +36,6 @@ COLLECTION_NAME = os.getenv("MONGODB_COLLECTION")
 WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
 FULL_DOCUMENT_LOOKUP = os.getenv("FULL_DOCUMENT_LOOKUP", "false").lower() == "true"
 
-# Sampling Configuration
-SAMPLING_RATE = float(os.getenv("SAMPLING_RATE", "0.1"))  # Default 10% sampling
-SAMPLING_WINDOW_SIZE = int(os.getenv("SAMPLING_WINDOW_SIZE", "1000"))
-MIN_SAMPLES_PER_INTERVAL = int(os.getenv("MIN_SAMPLES_PER_INTERVAL", "100"))
-
 # Performance tuning
 MAX_WORKERS = min(32, (os.cpu_count() or 1) * 4)
 BATCH_SIZE = 1000
@@ -65,19 +59,17 @@ CHANGE_STREAM_OPTIONS = {
     "batch_size": BATCH_SIZE,
 }
 
-# Exit condition configuration
-EXIT_FILE = "/tmp/run_completed"
-EMPTY_PERIOD_THRESHOLD = 3
-EMPTY_PERIOD_DURATION = 30
-MIN_DOCUMENTS_PROCESSED = 10000
-LOG_INTERVAL_OPERATIONS = 1000
-
 # Retry configuration
 MAX_RETRY_ATTEMPTS = 5
 INITIAL_RETRY_DELAY = 1
 MAX_RETRY_DELAY = 60
 
+# Sampling configuration
 SAMPLING_RATE = 0.05
+LOG_INTERVAL_OPERATIONS = 1000
+
+# Fixed runtime in seconds (5 minutes)
+RUNTIME_SECONDS = 300
 
 
 class SimpleSampler:
@@ -90,7 +82,7 @@ class SimpleSampler:
         self.latencies.append([round(timestamp, 2), round(latency, 2)])
 
     def get_stats(self):
-        if len(self.samples) == 0:
+        if not self.samples:
             return None
 
         sorted_samples = sorted(self.samples)
@@ -103,43 +95,39 @@ class SimpleSampler:
 
 
 class ChangeStreamMonitor:
-    def __init__(self, collection):
-        self.collection = collection
+    def __init__(self):
         self.sampler = SimpleSampler()
         self.total_documents_processed = 0
-        self.empty_periods = 0
-        self.exit_flag = threading.Event()
-        self.lock = threading.Lock()
+        self.start_time = time.time()
+        self.latest_change_time = None
+        self.operation_counts = {"unknown": {"insert": 0, "update": 0, "replace": 0}}
 
     def process_change(self, change):
-        with self.lock:
-            self.total_documents_processed += 1
-            if self.total_documents_processed % int(1 / SAMPLING_RATE) != 1:
-                return
+        self.total_documents_processed += 1
+        self.latest_change_time = datetime.now(timezone.utc)
+        if self.total_documents_processed % int(1 / SAMPLING_RATE) != 1:
+            return
 
-            now = datetime.now(timezone.utc)
-            if change["operationType"] in ["insert", "replace", "update"]:
-                region = self._get_region(change)
-            else:
-                region = "unknown"
+        if change["operationType"] in ["insert", "replace", "update"]:
+            region = self._get_region(change)
+        else:
+            region = "unknown"
 
-            self.operation_counts[region][change["operationType"]] += 1
+        if region not in self.operation_counts:
+            self.operation_counts[region] = {"insert": 0, "update": 0, "replace": 0}
+        self.operation_counts[region][change["operationType"]] += 1
 
-            operation_time = change.get("clusterTime", datetime.now(timezone.utc))
-            latency = self._calculate_latency(now, operation_time)
-            self.sampler.add_sample(now.timestamp, latency)
+        operation_time = change.get("clusterTime", datetime.now(timezone.utc))
+        latency = self._calculate_latency(self.latest_change_time, operation_time)
+        self.sampler.add_sample(self.latest_change_time.timestamp(), latency)
 
-            if self.total_documents_processed % LOG_INTERVAL_OPERATIONS == 1:
-                logger.info(f"processed {self.total_documents_processed} documents")
+        if self.total_documents_processed % LOG_INTERVAL_OPERATIONS == 1:
+            logger.info(f"Processed {self.total_documents_processed} documents")
 
     def _get_region(self, change):
         doc_id = change.get("documentKey", {}).get("_id", "")
-
-        # Extract region from _id (format: <region>-...)
         if isinstance(doc_id, str) and "-" in doc_id:
             return doc_id.split("-")[0]
-
-        logger.error(f"Could not extract region from _id: {doc_id}")
         return "unknown"
 
     def _calculate_latency(self, change_time, operation_time):
@@ -147,48 +135,21 @@ class ChangeStreamMonitor:
             operation_time = datetime.fromtimestamp(operation_time.time, timezone.utc)
         return round((change_time - operation_time).total_seconds() * 1000, 2)
 
-    def check_exit_conditions(self):
-        while not self.exit_flag.is_set():
-            time.sleep(EMPTY_PERIOD_DURATION)
-            with self.lock:
-                if time.time() - self.last_change_time > EMPTY_PERIOD_DURATION:
-                    self.empty_periods += 1
-                    logger.info(f"Empty period detected. Count: {self.empty_periods}")
-                    if (
-                        self.empty_periods >= EMPTY_PERIOD_THRESHOLD
-                        and self.total_documents_processed >= MIN_DOCUMENTS_PROCESSED
-                    ):
-                        logger.info("Exit conditions met. Stopping change stream...")
-                        self.print_final_summary()
-                        with open(EXIT_FILE, "w") as f:
-                            f.write(f"Change stream completed at {datetime.now()}")
-                        self.exit_flag.set()
-                else:
-                    self.empty_periods = 0
-
-    def start_exit_condition_checker(self):
-        self.exit_condition_thread = threading.Thread(target=self.check_exit_conditions)
-        self.exit_condition_thread.daemon = True
-        self.exit_condition_thread.start()
-
-    def stop_exit_condition_checker(self):
-        self.exit_flag.set()
-        if self.exit_condition_thread:
-            self.exit_condition_thread.join()
-
     def print_final_summary(self):
-        elapsed_time = int(time.time() - self.start_time)
+        elapsed_time = int(self.latest_change_time - self.start_time)
         stats = self.sampler.get_stats()
 
         logger.info("Change stream completed.")
         logger.info(f"Total runtime: {elapsed_time} seconds")
         logger.info(f"Total documents processed: {self.total_documents_processed}")
-        logger.info(
-            f"Average throughput: {self.total_documents_processed / elapsed_time:.2f} documents/second"
-        )
+
+        if self.total_documents_processed > 0:
+            logger.info(
+                f"Average throughput: {self.total_documents_processed / elapsed_time:.2f} documents/second"
+            )
 
         if stats:
-            logger.info(f"Final sampling stats:")
+            logger.info("Final sampling stats:")
             logger.info(f"  Sample count: {stats['sample_count']}")
             logger.info(f"  Median latency: {stats['median_latency']:.2f}ms")
             logger.info(f"  Min latency: {stats['min_latency']:.2f}ms")
@@ -196,20 +157,28 @@ class ChangeStreamMonitor:
 
         # Save sampled latencies to JSON file
         latencies_file_path = os.path.join("logs", "latencies.json")
+        metadata = {
+            "total_processed": self.total_documents_processed,
+            "sampled_count": len(self.sampler.latencies),
+            "total_runtime_seconds": elapsed_time,
+        }
+
+        if self.total_documents_processed > 0:
+            metadata.update(
+                {
+                    "average_throughput": self.total_documents_processed / elapsed_time,
+                    "median_latency": stats["median_latency"] if stats else None,
+                    "min_latency": stats["min_latency"] if stats else None,
+                    "max_latency": stats["max_latency"] if stats else None,
+                }
+            )
+
         with open(latencies_file_path, "w") as f:
             json.dump(
                 {
                     "data": self.sampler.latencies,
-                    "metadata": {
-                        "total_processed": self.total_documents_processed,
-                        "sampled_count": len(self.sampler.latencies),
-                        "total_runtime_seconds": elapsed_time,
-                        "average_throughput": self.total_documents_processed
-                        / elapsed_time,
-                        "median_latency": stats["median_latency"],
-                        "min_latency": stats["min_latency"],
-                        "max_latency": stats["max_latency"],
-                    },
+                    "metadata": metadata,
+                    "operation_counts": self.operation_counts,
                 },
                 f,
                 indent=2,
@@ -233,7 +202,6 @@ def connect_to_mongodb():
         raise ValueError("MONGODB_URI environment variable is not set")
 
     client = MongoClient(CONNECTION_STRING, server_api=ServerApi("1"), **CLIENT_OPTIONS)
-
     db = client.get_database(DB_NAME, read_preference=ReadPreference.NEAREST)
     collection = db[COLLECTION_NAME]
 
@@ -248,27 +216,26 @@ def connect_to_mongodb():
 
 
 def watch_changes(collection):
-    monitor = ChangeStreamMonitor(collection)
+    monitor = ChangeStreamMonitor()
     retry_attempts = 0
     resume_token = None
+    end_time = time.time() + RUNTIME_SECONDS
 
     def signal_handler(signum, frame):
         logger.info("Interrupt received, stopping change stream...")
-        monitor.stop_exit_condition_checker()
         monitor.print_final_summary()
         exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
-    monitor.start_exit_condition_checker()
 
     try:
-        while not monitor.exit_flag.is_set():
+        while time.time() < end_time:
             try:
                 with collection.watch(
                     [], **CHANGE_STREAM_OPTIONS, resume_after=resume_token
                 ) as stream:
                     for change in stream:
-                        if monitor.exit_flag.is_set():
+                        if time.time() >= end_time:
                             break
                         monitor.process_change(change)
                         resume_token = stream.resume_token
@@ -291,7 +258,6 @@ def watch_changes(collection):
     except Exception as e:
         logger.error(f"Unexpected error occurred: {e}")
     finally:
-        monitor.stop_exit_condition_checker()
         monitor.print_final_summary()
 
 
@@ -302,6 +268,7 @@ def main():
         logger.info(
             f"Starting change stream for all regions... (DB: {DB_NAME}, Collection: {COLLECTION_NAME})"
         )
+        logger.info(f"Will run for {RUNTIME_SECONDS} seconds")
         watch_changes(collection)
     finally:
         client.close()

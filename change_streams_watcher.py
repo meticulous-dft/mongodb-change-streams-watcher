@@ -114,7 +114,7 @@ class ChangeStreamMonitor:
     def process_change(self, change):
         with self.lock:
             self.total_documents_processed += 1
-            if self.total_documents_processed % int(100 / SAMPLING_RATE) != 1:
+            if self.total_documents_processed % int(1 / SAMPLING_RATE) != 1:
                 return
 
             now = datetime.now(timezone.utc)

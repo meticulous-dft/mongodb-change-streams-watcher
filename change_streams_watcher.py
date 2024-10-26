@@ -106,15 +106,18 @@ class ChangeStreamMonitor:
         self.start_time = time.time()
 
     def process_change(self, change):
-        self.total_documents_processed += 1
         now = datetime.now(timezone.utc)
+        self.total_documents_processed += 1
 
         # Sample only a portion of changes
         if self.total_documents_processed % int(1 / SAMPLING_RATE) != 1:
             return
 
-        cluster_time = change.get("clusterTime", datetime.now(timezone.utc))
-        operation_time = datetime.fromtimestamp(cluster_time.time, timezone.utc)
+        logger.info(f"{change.get("updateDescription", {})}")
+        ts = float(
+            change.get("updateDescription", {}).get("updatedFields", {}).get("ts")
+        )
+        operation_time = datetime.fromtimestamp(ts, timezone.utc)
         latency = round((now - operation_time).total_seconds() * 1000, 2)
         self.sampler.add_sample(now.timestamp(), latency)
 
@@ -183,6 +186,7 @@ def watch_changes(collection):
                 "documentKey": 1,
                 "operationType": 1,
                 "clusterTime": 1,
+                "updateDescription": 1,
             }
         }
     ]
@@ -191,15 +195,6 @@ def watch_changes(collection):
         with collection.watch(pipeline, **CHANGE_STREAM_OPTIONS) as stream:
             for change in stream:
                 monitor.process_change(change)
-
-                # Log progress
-                if (
-                    monitor.total_documents_processed > 0
-                    and monitor.total_documents_processed % LOG_INTERVAL_OPERATIONS == 0
-                ):
-                    logger.info(
-                        f"Processed {monitor.total_documents_processed} documents"
-                    )
 
                 if monitor.total_documents_processed >= DOCUMENTS_TO_PROCESS:
                     logger.info(

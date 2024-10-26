@@ -53,9 +53,10 @@ CLIENT_OPTIONS = {
 
 # Change Stream Configuration
 BATCH_SIZE = os.getenv("BATCH_SIZE", 1000)
+MAX_AWAIT_TIME_MS = os.getenv("MAX_AWAIT_TIME_MS", 1000)
 CHANGE_STREAM_OPTIONS = {
     "full_document": "default",
-    "max_await_time_ms": 1000,
+    "max_await_time_ms": MAX_AWAIT_TIME_MS,
     "batch_size": BATCH_SIZE,
 }
 

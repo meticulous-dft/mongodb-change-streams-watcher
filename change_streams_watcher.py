@@ -38,7 +38,6 @@ DOCUMENTS_TO_PROCESS = os.getenv("DOCUMENTS_TO_PROCESS", 10001)
 
 # Performance tuning
 MAX_WORKERS = min(32, (os.cpu_count() or 1) * 4)
-BATCH_SIZE = 1000
 
 # MongoDB Client Configuration
 CLIENT_OPTIONS = {
@@ -53,15 +52,16 @@ CLIENT_OPTIONS = {
 }
 
 # Change Stream Configuration
+BATCH_SIZE = os.getenv("BATCH_SIZE", 1000)
 CHANGE_STREAM_OPTIONS = {
-    "full_document": "updateLookup" if FULL_DOCUMENT_LOOKUP else "default",
+    "full_document": "default",
     "max_await_time_ms": 1000,
     "batch_size": BATCH_SIZE,
 }
 
 # Sampling configuration
-SAMPLING_RATE = 0.05
-LOG_INTERVAL_OPERATIONS = 1000
+SAMPLING_RATE = os.getenv("SAMPLING_RATE", 0.05)
+LOG_INTERVAL_OPERATIONS = os.getenv("LOG_INTERVAL_OPERATIONS", 1000)
 
 # Exit file path
 EXIT_FILE = "/tmp/change_streams_completed"
@@ -104,24 +104,9 @@ class ChangeStreamMonitor:
             return
 
         cluster_time = change.get("clusterTime", datetime.now(timezone.utc))
-        latency = self._calculate_latency(now, cluster_time)
+        operation_time = datetime.fromtimestamp(cluster_time.time, timezone.utc)
+        latency = round((now - operation_time).total_seconds() * 1000, 2)
         self.sampler.add_sample(now.timestamp(), latency)
-
-    def _calculate_latency(self, change_time, operation_time):
-        if isinstance(operation_time, Timestamp):
-            operation_time = datetime.fromtimestamp(operation_time.time, timezone.utc)
-        elif isinstance(operation_time, datetime):
-            if operation_time.tzinfo is None:
-                operation_time = operation_time.replace(tzinfo=timezone.utc)
-        else:
-            logger.warning(f"Unexpected operation_time type: {type(operation_time)}")
-            return 0
-
-        # Ensure change_time has timezone
-        if change_time.tzinfo is None:
-            change_time = change_time.replace(tzinfo=timezone.utc)
-
-        return round((change_time - operation_time).total_seconds() * 1000, 2)
 
     def print_final_summary(self):
         wall_time = int(time.time() - self.start_time)
@@ -180,8 +165,18 @@ def watch_changes(collection):
 
     signal.signal(signal.SIGINT, signal_handler)
 
+    pipeline = [
+        {
+            "$project": {
+                "documentKey": 1,
+                "operationType": 1,
+                "clusterTime": 1,
+            }
+        }
+    ]
+
     try:
-        with collection.watch([], **CHANGE_STREAM_OPTIONS) as stream:
+        with collection.watch(pipeline, **CHANGE_STREAM_OPTIONS) as stream:
             for change in stream:
                 monitor.process_change(change)
 

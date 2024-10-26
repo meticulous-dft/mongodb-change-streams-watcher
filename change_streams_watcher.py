@@ -100,10 +100,6 @@ class ChangeStreamMonitor:
         self.total_documents_processed += 1
         now = datetime.now(timezone.utc)
 
-        if self.first_change_time is None:
-            self.first_change_time = now
-        self.last_change_time = now
-
         # Sample only a portion of changes
         if self.total_documents_processed % int(1 / SAMPLING_RATE) != 1:
             return

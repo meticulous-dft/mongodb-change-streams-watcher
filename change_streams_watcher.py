@@ -113,11 +113,8 @@ class ChangeStreamMonitor:
         if self.total_documents_processed % int(1 / SAMPLING_RATE) != 1:
             return
 
-        logger.info(f"{change.get("updateDescription", {})}")
-        ts = float(
-            change.get("updateDescription", {}).get("updatedFields", {}).get("ts")
-        )
-        operation_time = datetime.fromtimestamp(ts, timezone.utc)
+        cluster_time = change.get("clusterTime", datetime.now(timezone.utc))
+        operation_time = datetime.fromtimestamp(cluster_time.time, timezone.utc)
         latency = round((now - operation_time).total_seconds() * 1000, 2)
         self.sampler.add_sample(now.timestamp(), latency)
 
@@ -186,7 +183,6 @@ def watch_changes(collection):
                 "documentKey": 1,
                 "operationType": 1,
                 "clusterTime": 1,
-                "updateDescription": 1,
             }
         }
     ]

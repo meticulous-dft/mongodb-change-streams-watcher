@@ -34,7 +34,7 @@ DB_NAME = os.getenv("MONGODB_DATABASE")
 COLLECTION_NAME = os.getenv("MONGODB_COLLECTION")
 WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
 FULL_DOCUMENT_LOOKUP = os.getenv("FULL_DOCUMENT_LOOKUP", "false").lower() == "true"
-DOCUMENTS_TO_PROCESS = os.getenv("DOCUMENTS_TO_PROCESS", 10001)
+DOCUMENTS_TO_PROCESS = int(os.getenv("DOCUMENTS_TO_PROCESS", 10001))
 
 # Performance tuning
 MAX_WORKERS = min(32, (os.cpu_count() or 1) * 4)
@@ -52,8 +52,8 @@ CLIENT_OPTIONS = {
 }
 
 # Change Stream Configuration
-BATCH_SIZE = os.getenv("BATCH_SIZE", 1000)
-MAX_AWAIT_TIME_MS = os.getenv("MAX_AWAIT_TIME_MS", 1000)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", 1000))
+MAX_AWAIT_TIME_MS = int(os.getenv("MAX_AWAIT_TIME_MS", 1000))
 CHANGE_STREAM_OPTIONS = {
     "full_document": "default",
     "max_await_time_ms": MAX_AWAIT_TIME_MS,
@@ -61,8 +61,8 @@ CHANGE_STREAM_OPTIONS = {
 }
 
 # Sampling configuration
-SAMPLING_RATE = os.getenv("SAMPLING_RATE", 0.05)
-LOG_INTERVAL_OPERATIONS = os.getenv("LOG_INTERVAL_OPERATIONS", 1000)
+SAMPLING_RATE = float(os.getenv("SAMPLING_RATE", 0.05))
+LOG_INTERVAL_OPERATIONS = int(os.getenv("LOG_INTERVAL_OPERATIONS", 1000))
 
 # Exit file path
 EXIT_FILE = "/tmp/change_streams_completed"

@@ -1,5 +1,6 @@
 import os
 import signal
+import statistics
 import time
 from datetime import datetime, timezone
 import logging
@@ -213,8 +214,44 @@ def connect_to_mongodb():
     return client, collection
 
 
+def calculate_server_time_offset(client, samples=10) -> float:
+    """
+    Calculate the time difference between server and client with improved accuracy
+    Returns the median offset (positive if server is ahead, negative if behind)
+    """
+    offsets = []
+    network_latencies = []
+
+    for _ in range(samples):
+        # Get server time before and after to measure request time
+        start_time = time.time()
+        server_status = client.admin.command("serverStatus")
+        end_time = time.time()
+
+        # Use server's system.localTime for better accuracy
+        server_time = server_status["localTime"].timestamp()
+
+        # Calculate network latency (round trip time / 2)
+        network_latency = (end_time - start_time) / 2
+        network_latencies.append(network_latency * 1000)  # Store in ms
+
+        # The server time should be compared to the midpoint of our request
+        client_time = start_time + network_latency
+        offset = server_time - client_time
+        offsets.append(offset)
+
+        time.sleep(0.5)  # Small delay between samples
+    logger.info(
+        f"Network latencies: median: {statistics.median(network_latencies)}, samples: {network_latencies}"
+    )
+    logger.info(
+        f"Time offsets: median: {statistics.median(offsets)}, samples: {offsets}"
+    )
+
+
 def main():
     client, collection = connect_to_mongodb()
+    calculate_server_time_offset(client)
 
     try:
         logger.info(

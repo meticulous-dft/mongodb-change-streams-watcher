@@ -1,16 +1,14 @@
 import os
 import signal
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from collections import defaultdict
 import logging
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import PyMongoError, OperationFailure, NetworkTimeout
-from bson.timestamp import Timestamp
 import threading
-import json
 
 # Load .env file if it exists
 load_dotenv()
@@ -21,26 +19,24 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler("logs/change_streams_watcher.log"),
+        logging.FileHandler("logs/change_streams_verify.log"),
         logging.StreamHandler(),
     ],
 )
 logger = logging.getLogger()
-
-# Disable other loggers
 logging.getLogger("pymongo").setLevel(logging.WARNING)
 
 CONNECTION_STRING = os.getenv("MONGODB_URI")
 DB_NAME = os.getenv("MONGODB_DATABASE")
 COLLECTION_NAME = os.getenv("MONGODB_COLLECTION")
-WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
 
 # Retry configuration
 MAX_RETRY_ATTEMPTS = 5
 INITIAL_RETRY_DELAY = 1  # seconds
 MAX_RETRY_DELAY = 60  # seconds
 
-# Exit condition configuration
+# Test configuration
+WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
 EXIT_FILE = "/tmp/run_completed"
 EMPTY_PERIOD_THRESHOLD = int(os.getenv("EMPTY_PERIOD_THRESHOLD", 5))
 EMPTY_PERIOD_DURATION = int(os.getenv("EMPTY_PERIOD_DURATION", 30))
@@ -49,47 +45,14 @@ MIN_DOCUMENTS_PROCESSED = int(
 )  # Minimum number of documents to process before exiting
 
 # Logging configuration
-LOG_INTERVAL_OPERATIONS = int(os.getenv("LOG_INTERVAL_OPERATIONS", 100))
+LOG_INTERVAL_OPERATIONS = int(os.getenv("LOG_INTERVAL_OPERATIONS", 1000))
 LOG_INTERVAL_SECONDS = int(os.getenv("LOG_INTERVAL_SECONDS", 10))
-
-
-def wait_for_load_completion():
-    if WAIT_FILE_PATH:
-        logger.info(f"Waiting for load completion file: {WAIT_FILE_PATH}")
-        while not os.path.exists(WAIT_FILE_PATH):
-            logger.debug(f"Waiting for file: {WAIT_FILE_PATH}")
-            time.sleep(10)  # Check every 10 seconds
-        logger.info("Load completion file found. Proceeding with monitoring.")
-    else:
-        logger.info("No wait file specified. Proceeding immediately.")
-
-
-def connect_to_mongodb():
-    if not CONNECTION_STRING:
-        raise ValueError("MONGODB_URI environment variable is not set")
-    client = MongoClient(CONNECTION_STRING, server_api=ServerApi("1"))
-    db = client[DB_NAME]
-    collection = db[COLLECTION_NAME]
-    return client, collection
-
-
-def calculate_latency(change_time, operation_time):
-    if isinstance(operation_time, Timestamp):
-        operation_time = datetime.fromtimestamp(operation_time.time, timezone.utc)
-    return round(
-        (change_time - operation_time).total_seconds() * 1000, 2
-    )  # Convert to milliseconds and round to 2 decimal places
-
-
-def get_region_from_document(document):
-    return document.get("location", "unknown") if document else "unknown"
 
 
 class ChangeStreamMonitor:
     def __init__(self, collection):
         self.collection = collection
         self.operation_counts = defaultdict(lambda: defaultdict(int))
-        self.latencies = defaultdict(lambda: defaultdict(list))
         self.start_time = time.time()
         self.total_documents_processed = 0
         self.last_change_time = time.time()
@@ -97,24 +60,13 @@ class ChangeStreamMonitor:
         self.empty_periods = 0
         self.exit_flag = threading.Event()
         self.lock = threading.Lock()
-        self.all_latencies = []  # Store all latencies with timestamps
 
     def process_change(self, change):
         with self.lock:
-            operation_time = change.get("clusterTime", datetime.now(timezone.utc))
-            change_time = datetime.now(timezone.utc)
-            latency = calculate_latency(change_time, operation_time)
-
             if change["operationType"] in ["insert", "replace", "update"]:
-                region = get_region_from_document(change.get("fullDocument"))
-            else:
-                region = "unknown"
+                region = change.get("documentKey").get("location", "unknown")
 
             self.operation_counts[region][change["operationType"]] += 1
-            self.latencies[region][change["operationType"]].append(latency)
-            self.all_latencies.append(
-                (round(time.time(), 2), latency)
-            )  # Store rounded timestamp and latency
             self.total_documents_processed += 1
             self.last_change_time = time.time()
             self.empty_periods = 0
@@ -143,20 +95,10 @@ class ChangeStreamMonitor:
             f"Total documents processed: {self.total_documents_processed};"
         ]
 
-        for region, ops in self.operation_counts.items():
-            for op_type, count in ops.items():
-                if count > 0:
-                    current_latency = self.latencies[region][op_type][-1]
-                    log_lines.append(
-                        f" [{region}-{op_type.upper()}: Count={count}, "
-                        f"Current Latency={current_latency:.2f}ms] "
-                    )
-
         logger.info("".join(log_lines))
 
         # Reset counters for the next logging interval
         self.operation_counts.clear()
-        self.latencies.clear()
         self.last_log_time = time.time()
 
     def check_exit_conditions(self):
@@ -196,12 +138,6 @@ class ChangeStreamMonitor:
             f"Average throughput: {self.total_documents_processed / elapsed_time:.2f} documents/second"
         )
 
-        # Save all latencies to a JSON file in the logs folder for later analysis
-        latencies_file_path = os.path.join("logs", "latencies.json")
-        with open(latencies_file_path, "w") as f:
-            json.dump(self.all_latencies, f)
-        logger.info(f"Latencies saved to {latencies_file_path}")
-
 
 def watch_changes(collection):
     monitor = ChangeStreamMonitor(collection)
@@ -218,12 +154,21 @@ def watch_changes(collection):
 
     monitor.start_exit_condition_checker()
 
+    pipeline = [
+        {
+            "$project": {
+                "documentKey": 1,
+                "operationType": 1,
+                "clusterTime": 1,
+            }
+        }
+    ]
+
     try:
         while not monitor.exit_flag.is_set():
             try:
                 with collection.watch(
-                    [],
-                    full_document="updateLookup",
+                    pipeline=pipeline,
                     resume_after=resume_token,
                 ) as stream:
                     for change in stream:
@@ -254,6 +199,13 @@ def watch_changes(collection):
         monitor.print_final_summary()
 
 
+def connect_to_mongodb():
+    client = MongoClient(CONNECTION_STRING, server_api=ServerApi("1"))
+    db = client[DB_NAME]
+    collection = db[COLLECTION_NAME]
+    return client, collection
+
+
 def main():
     client, collection = connect_to_mongodb()
 
@@ -267,5 +219,12 @@ def main():
 
 
 if __name__ == "__main__":
-    wait_for_load_completion()
+    if WAIT_FILE_PATH:
+        logger.info(f"Waiting for file: {WAIT_FILE_PATH}")
+        while not os.path.exists(WAIT_FILE_PATH):
+            time.sleep(10)
+        logger.info(f"wait file {WAIT_FILE_PATH} found. Proceeding with monitoring.")
+    else:
+        logger.info("No wait file specified. Proceeding immediately.")
+
     main()

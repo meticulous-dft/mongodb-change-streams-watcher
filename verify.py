@@ -95,6 +95,11 @@ class ChangeStreamMonitor:
             f"Total documents processed: {self.total_documents_processed};"
         ]
 
+        for region, ops in self.operation_counts.items():
+            for op_type, count in ops.items():
+                if count > 0:
+                    log_lines.append(f" [{region}-{op_type.upper()}: Count={count}]")
+
         logger.info("".join(log_lines))
 
         # Reset counters for the next logging interval

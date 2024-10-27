@@ -36,14 +36,13 @@ INITIAL_RETRY_DELAY = 1  # seconds
 MAX_RETRY_DELAY = 60  # seconds
 
 # Test configuration
-WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
-EXIT_FILE = "/tmp/run_completed"
 EMPTY_PERIOD_THRESHOLD = int(os.getenv("EMPTY_PERIOD_THRESHOLD", 5))
 EMPTY_PERIOD_DURATION = int(os.getenv("EMPTY_PERIOD_DURATION", 30))
 MIN_DOCUMENTS_PROCESSED = int(
     os.getenv("MIN_DOCUMENTS_PROCESSED", 10000)
 )  # Minimum number of documents to process before exiting
-
+WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
+EXIT_FILE = "/tmp/change_streams_completed"
 # Logging configuration
 LOG_INTERVAL_OPERATIONS = int(os.getenv("LOG_INTERVAL_OPERATIONS", 1000))
 LOG_INTERVAL_SECONDS = int(os.getenv("LOG_INTERVAL_SECONDS", 10))

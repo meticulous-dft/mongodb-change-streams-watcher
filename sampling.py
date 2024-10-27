@@ -57,10 +57,8 @@ CHANGE_STREAM_OPTIONS = {
 
 # Test configuration
 SAMPLING_RATE = float(os.getenv("SAMPLING_RATE", 0.05))
-WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
 DOCUMENTS_TO_PROCESS = int(os.getenv("DOCUMENTS_TO_PROCESS", 10001))
-
-# Exit file path
+WAIT_FILE_PATH = os.getenv("WAIT_FILE_PATH")
 EXIT_FILE = "/tmp/change_streams_completed"
 
 
